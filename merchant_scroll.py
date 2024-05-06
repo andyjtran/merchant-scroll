@@ -4,14 +4,16 @@ from string import ascii_uppercase
 
 df = pd.read_csv('/home/andy/Downloads/moxfield_haves.csv')
 
-# Remove Art cards, Jumpstart theme cards, and 30th Anniversary Play Promo cards
+# Remove art cards, Jumpstart theme cards, and 30th Anniversary Play Promo cards
 df = df[~((df['Edition'].str.len() == 4) & (df['Edition'].str.startswith('a') | df['Edition'].str.startswith('f') | df['Edition'].str.contains('p30a')))]
 
-# Card Kingdom assigned a letter to basic lands before Ikoria: Lair of Behemoths (IKO) / Q2 2020 whenever basic lands had mulitple arts
-# Call Scryfall API to get basic land collector numbers and assign letter
+# Card Kingdom assigned a letter to basic lands before Ikoria: Lair of Behemoths (IKO) / Q2 2020 for sets with multiple basic lands of the same type. 
+# Card Kingdom assigns letters in alphabetical order from least to greatest collector number for basic lands of the same type in the same set
+
 editions_with_assigned_letters = ['eld', 'war', 'm19', 'm20']
 basic_land = ['Plains','Island','Swamp','Mountain','Forest']
 
+# Call Scryfall API to assign letter to basic lands
 scryfall_url = "https://api.scryfall.com/cards/search"
 
 cards_data = []
@@ -21,7 +23,6 @@ for edition in editions_with_assigned_letters:
         query = f'set:{edition} name:"{land}" unique:prints'
         has_more = True
         page_url = scryfall_url
-        # Paginate through each basic land art
         while has_more:
             response = requests.get(page_url, params={'q': query})
             if response.status_code == 200:
@@ -40,6 +41,7 @@ for edition in editions_with_assigned_letters:
 df_scry = pd.DataFrame(cards_data)
 df_scry = df_scry.sort_values(by=['Name','Edition', 'Collector Number'])
 
+# Create letters based on Scryfall data
 def assign_letters(group):
     group['Letter'] = [ascii_uppercase[i] for i in range(len(group))]
     return group
@@ -47,10 +49,11 @@ def assign_letters(group):
 df_land_letter = df_scry.groupby(['Name','Edition'], as_index=True).apply(assign_letters, include_groups=False)
 df_land_letter = df_land_letter.reset_index(drop=False)
 
+# Format and merge Scryfall data with Moxfield data 
 df_land_letter['Collector Number'] = df_land_letter['Collector Number'].astype(str)
-
 df = pd.merge(df, df_land_letter, on=['Name','Edition', 'Collector Number'], how='left')
 
+# Assign letters
 df.loc[pd.notna(df['Letter']), 'Collector Number'] = df['Collector Number'].astype(str) + ' ' + df['Letter'].fillna('')
 df = df.drop(columns=['Letter'])
 
@@ -90,7 +93,6 @@ df.loc[df['Name'].isin(basic_land),'Name'] = df['Name'] + ' ' + df['Collector Nu
 df.loc[df['Edition'].isin(['wot']),'Name'] = df['Name'] + ' ' + df['Collector Number'].astype(str)
 
 df.loc[df['Edition'].isin(['otp']),'Name'] = df['Name'] + ' ' + df['Collector Number'].astype(str).str.slice(0, 5) + ' - Showcase)'
-
 
 # Trim names for split and double-faced cards
 df['Name'] = df['Name'].str.split("//").str[0]
