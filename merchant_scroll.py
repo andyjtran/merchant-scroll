@@ -7,7 +7,7 @@ df = pd.read_csv('/home/andy/Downloads/moxfield_haves.csv')
 # Remove art cards, Jumpstart theme cards, and 30th Anniversary Play Promo cards
 df = df[~((df['Edition'].str.len() == 4) & (df['Edition'].str.startswith('a') | df['Edition'].str.startswith('f') | df['Edition'].str.contains('p30a')))]
 
-# Basic Lands
+# Basic Land Formatting
 # Scryfall API to count unique prints of basic lands for relevant sets
 basic_land = ['Plains','Island','Swamp','Mountain','Forest']
 scryfall_url = "https://api.scryfall.com/cards/search"
@@ -47,7 +47,7 @@ df = pd.merge(df, df_land_letter, on=['Name','Edition', 'Collector Number'], how
 df.loc[pd.notna(df['Letter']), 'Collector Number'] = df['Collector Number'].astype(str) + ' ' + df['Letter'].fillna('')
 df = df.drop(columns=['Letter'])
 
-# Tokens
+# Token Formatting
 # Scryfall API to count unique prints of tokens in each set
 token_edition = df[(df['Edition'].str.len() == 4) & (df['Edition'].str.startswith('t'))]
 scryfall_token = []
@@ -75,7 +75,7 @@ df_token = pd.DataFrame(scryfall_token)
 unique_token = df_token.groupby(['Name', 'Edition'])['Collector Number'].nunique().reset_index(name='Unique Count')
 df = pd.merge(df, unique_token, on=['Name','Edition'], how='left')
 
-# Collector Number
+# Collector Number Formatting
 editions_with_three_digit_collector_number = ['afr', 'bro', 'brr', 'dmu', 'eld', 'j22', 'm19', 'm20', 'm21', 'neo', 'tneo', 'one', 'slx', 'snc', 'tsnc', 'vow', 'tvow', 'war']
 
 def format_collector_number(row):
@@ -114,7 +114,10 @@ mask = ~df['Name'].str.contains('Token')
 df.loc[mask, 'Name'] = df.loc[mask, 'Name'].str.split('//').str[0]
 df['Edition'] = df['Edition'].apply(lambda x: x[1:] if (len(x) == 4 and x.startswith('t')) else x)
 
+# Header Formatting
 df.rename(columns={'Name': 'Title', 'Count': 'Qty'}, inplace=True)
 cardkingdom_column_subset = ['Title','Edition','Foil','Qty']
 df = df[cardkingdom_column_subset]
+
+# Create cardkingdom.csv
 df.to_csv('/home/andy/Downloads/cardkingdom.csv', index=False)
