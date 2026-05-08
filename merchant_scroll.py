@@ -1,11 +1,34 @@
 import pandas as pd
 import requests
 from string import ascii_uppercase
+import unicodedata
+from datetime import date
 
 df = pd.read_csv('/home/andy/Downloads/moxfield_haves.csv')
 
 # Remove art cards, Jumpstart theme cards, and 30th Anniversary Play Promo cards
 df = df[~((df['Edition'].str.len() == 4) & (df['Edition'].str.startswith('a') | df['Edition'].str.startswith('f') | df['Edition'].str.contains('p30a')))]
+
+# Remove Adventures in the Forgotten Realms dungeon tokens
+EXCLUDED_TOKENS = [
+    ('Goblin Token', 'tafr', 'foil'),
+    ('Skeleton Token', 'tafr', 'foil'),
+    ('The Atropal Token', 'tafr', 'foil'),
+]
+
+for token_name, token_edition, token_foil in EXCLUDED_TOKENS:
+    df = df[~(
+        (df['Name'] == token_name) &
+        (df['Edition'].str.lower() == token_edition) &
+        (df['Foil'] == token_foil)
+    )]
+
+# Normalize special characters in card names (e.g. á -> a, ü -> u)
+def normalize_name(name):
+    return unicodedata.normalize('NFD', name).encode('ascii', 'ignore').decode('ascii')
+
+df['Name'] = df['Name'].apply(normalize_name)
+
 
 # Basic Land Formatting
 # Scryfall API to count unique prints of basic lands for relevant sets
@@ -102,17 +125,95 @@ df['Collector Number'] = df.apply(format_collector_number, axis=1)
 
 # Append collector number to basic lands
 df.loc[df['Name'].isin(basic_land),'Name'] = df['Name'] + ' ' + df['Collector Number'].astype(str)
+
 # Append collector number to tokens
+# Sets released on or after Foundations (2024-11-15) always append a 4-digit collector number.
+# Earlier sets only append when there are multiple prints of the same token in a set.
+FDN_RELEASE_DATE = date(2024, 11, 15)
+scryfall_set_url = "https://api.scryfall.com/sets/{}"
+set_release_cache = {} 
+
+token_editions = df[(df['Edition'].str.len() == 4) & (df['Edition'].str.startswith('t'))]['Edition'].unique()
+for edition in token_editions:
+    base_code = edition[1:]  # strip leading 't' to get the parent set code
+    if base_code in set_release_cache:
+        continue
+    response = requests.get(scryfall_set_url.format(base_code))
+    if response.status_code == 200:
+        released_at_str = response.json().get('released_at', '')
+        try:
+            set_release_cache[base_code] = date.fromisoformat(released_at_str)
+        except ValueError:
+            set_release_cache[base_code] = None
+    else:
+        set_release_cache[base_code] = None
+
+def is_post_fdn(edition):
+    base_code = edition[1:] if (len(edition) == 4 and edition.startswith('t')) else edition
+    release = set_release_cache.get(base_code)
+    return release is not None and release >= FDN_RELEASE_DATE
+
 token_str = ' Token '
 df['Name'] = df.apply(lambda x: x['Name'] + token_str if (len(x['Edition']) == 4 and x['Edition'].startswith('t')) else x['Name'], axis=1)
-df['Name'] = df.apply(lambda x: x['Name'] + x['Collector Number'] if (len(x['Edition']) == 4 and x['Edition'].startswith('t') and x['Unique Count'] > 1) else x['Name'], axis=1)
+
+def append_token_collector_number(row):
+    is_token = len(row['Edition']) == 4 and row['Edition'].startswith('t')
+    if not is_token:
+        return row['Name']
+    cn_raw = str(row['Collector Number']).lstrip('(').rstrip(')')
+    if is_post_fdn(row['Edition']):
+        return row['Name'] + '(' + cn_raw.zfill(4) + ')'
+    if row['Unique Count'] > 1:
+        return row['Name'] + row['Collector Number']
+    return row['Name']
+
+df['Name'] = df.apply(append_token_collector_number, axis=1)
+
 # Append collector number to bonus sheet
 df.loc[df['Edition'].isin(['wot']),'Name'] = df['Name'] + ' ' + df['Collector Number'].astype(str)
 df.loc[df['Edition'].isin(['otp']),'Name'] = df['Name'] + ' ' + df['Collector Number'].astype(str).str.slice(0, 5) + ' - Showcase)'
+
 # Trim names for double-faced cards
-mask = ~df['Name'].str.contains('Token')
-df.loc[mask, 'Name'] = df.loc[mask, 'Name'].str.split('//').str[0]
+# Specifying layouts ensures split cards are not trimmed
+STRIP_LAYOUTS = {'transform', 'modal_dfc'}
+
+dfc_cards = df[df['Name'].str.contains('//', na=False) & ~df['Name'].str.contains('Token')]
+dfc_unique = dfc_cards[['Name', 'Edition']].drop_duplicates()
+
+scryfall_layout_url = "https://api.scryfall.com/cards/named"
+layout_cache = {}  # keyed by (name_front, edition)
+
+for _, row in dfc_unique.iterrows():
+    front_name = row['Name'].split('//')[0].strip()
+    edition = row['Edition']
+    key = (front_name, edition)
+    if key in layout_cache:
+        continue
+    response = requests.get(scryfall_layout_url, params={'exact': front_name, 'set': edition})
+    if response.status_code == 200:
+        layout_cache[key] = response.json().get('layout', '')
+    else:
+        # Fallback: try without set constraint
+        response = requests.get(scryfall_layout_url, params={'exact': front_name})
+        layout_cache[key] = response.json().get('layout', '') if response.status_code == 200 else ''
+
+def should_strip(row):
+    if '//' not in str(row['Name']) or 'Token' in str(row['Name']):
+        return False
+    front_name = row['Name'].split('//')[0].strip()
+    layout = layout_cache.get((front_name, row['Edition']), '')
+    return layout in STRIP_LAYOUTS
+
+strip_mask = df.apply(should_strip, axis=1)
+df.loc[strip_mask, 'Name'] = df.loc[strip_mask, 'Name'].str.split('//').str[0].str.strip()
+
 df['Edition'] = df['Edition'].apply(lambda x: x[1:] if (len(x) == 4 and x.startswith('t')) else x)
+
+# Prerelease Foil Formatting
+PRERELEASE_EDITIONS = ['pdft', 'pmkm', 'ptdm']
+df.loc[df['Edition'].str.lower().isin(PRERELEASE_EDITIONS), 'Name'] = df['Name'] + ' (Prerelease Foil)'
+df['Edition'] = df['Edition'].apply(lambda x: x[1:] if x.lower() in PRERELEASE_EDITIONS else x)
+
 
 # Header Formatting
 df.rename(columns={'Name': 'Title', 'Count': 'Qty'}, inplace=True)
